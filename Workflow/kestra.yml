@@ -1,0 +1,114 @@
+id: github-issue-triage-openai
+namespace: github
+
+inputs:
+  - id: issue_title
+    name: issue_title
+    type: STRING
+  - id: issue_body
+    name: issue_body
+    type: STRING
+    
+  - id: issue_number
+    name: Issue Number
+    type: STRING
+
+  - id: repo_owner
+    name: Repository Owner
+    type: STRING
+
+  - id: repo_name
+    name: Repository Name
+    type: STRING
+
+  - id: installation_token
+    name: GitHub Installation Token
+    type: STRING
+
+
+tasks:
+  - id: classify_issue_python
+    type: io.kestra.plugin.scripts.python.Script
+    beforeCommands:
+      - pip install requests kestra
+
+    script: |
+      import os
+      import requests
+      from kestra import Kestra
+
+      API_KEY = "{{ kv('GEMINI_API_KEY') }}"
+
+      # Injected from Kestra inputs
+      issue_title = """{{ inputs.issue_title }}"""
+      issue_body = """{{ inputs.issue_body }}"""
+
+      prompt = f"""
+      Classify the following GitHub issue into one of: bug, feature, question, other.
+
+      Title: {issue_title}
+      Body: {issue_body}
+
+      Return only the label.
+      """
+
+      headers = {
+          "Content-Type": "application/json",
+      }
+
+      payload = {
+          "contents": [
+              {
+                  "parts": [
+                      {"text": prompt.strip()}
+                  ]
+              }
+          ]
+      }
+
+      url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={API_KEY}"
+
+      response = requests.post(url, headers=headers, json=payload)
+      response.raise_for_status()
+      data = response.json()
+
+      gh_labels = data["candidates"][0]["content"]["parts"][0]["text"].strip().lower()
+      Kestra.outputs({'gh_label': data["candidates"][0]["content"]["parts"][0]["text"].strip().lower()})
+
+
+  - id: update_issue_label
+    type: io.kestra.plugin.core.http.Request
+    method: PATCH
+    uri: "https://api.github.com/repos/{{ inputs.repo_owner }}/{{ inputs.repo_name }}/issues/{{ inputs.issue_number }}"
+    headers:
+      Authorization: "token {{ inputs.installation_token }}"
+      Accept: "application/vnd.github+json"
+      Content-Type: "application/json"
+    body: |
+      {
+        "labels": ["{{ outputs.classify_issue_python.vars.gh_label }}"]
+      }
+
+  - id: send_discord_message
+    type: io.kestra.plugin.core.http.Request
+    method: POST
+    uri: "{{ kv('DISCORD') }}"
+    headers:
+      Content-Type: "application/json"
+    body: |
+      {
+        "content": "New GitHub issue:\n**Title:** {{ inputs.issue_title }}\n**Body:** {{ inputs.issue_body }}\n**Label:** {{ outputs.classify_issue_python.vars.gh_label }}\nThanks for reporting!"
+      }
+
+  - id: comment_on_issue
+    type: io.kestra.plugin.core.http.Request
+    method: POST
+    uri: "https://api.github.com/repos/{{ inputs.repo_owner }}/{{ inputs.repo_name }}/issues/{{ inputs.issue_number }}/comments"
+    headers:
+      Authorization: "token {{ inputs.installation_token }}"
+      Accept: "application/vnd.github+json"
+      Content-Type: "application/json"
+    body: |
+      {
+        "body": "Thank you for opening this issue! We have labeled it as **{{ outputs.classify_issue_python.vars.gh_label }}**."
+      }

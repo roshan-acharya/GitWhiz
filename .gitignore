@@ -1,0 +1,3 @@
+webhook-server/venv
+webhook-server/__pycache__
+webhook-server/.env
